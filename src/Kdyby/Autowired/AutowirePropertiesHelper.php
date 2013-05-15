@@ -19,69 +19,113 @@ use Nette\Utils\Strings;
 
 
 /**
- * @author Filip Procházka <filip@prochazka.su>
+ * Automagically autowire properties
  *
- * @method Nette\Application\UI\PresenterComponentReflection getReflection()
+ * @author Filip Procházka <filip@prochazka.su>
  */
-trait AutowireProperties
+class AutowirePropertiesHelper extends Nette\Object
 {
-
-	/**
-	 * @var array
-	 */
-	private $autowireProperties = array();
 
 	/**
 	 * @var Nette\DI\Container
 	 */
-	private $autowirePropertiesLocator;
+	private $container;
+
+	/**
+	 * @var bool
+	 */
+	private $strict;
+
+
+
+	public function __construct(Nette\DI\Container $container, $strict = TRUE)
+	{
+		$this->container = $container;
+		$this->strict = $strict;
+	}
 
 
 
 	/**
-	 * @param \Nette\DI\Container $dic
+	 * @param Nette\Application\UI\Presenter|object $object
 	 * @throws MemberAccessException
 	 * @throws MissingServiceException
 	 * @throws InvalidStateException
 	 * @throws UnexpectedValueException
 	 */
-	public function injectProperties(Nette\DI\Container $dic)
+	public function injectHerePlease($object)
 	{
-		if (!$this instanceof Nette\Application\UI\PresenterComponent) {
-			throw new MemberAccessException('Trait ' . __TRAIT__ . ' can be used only in descendants of PresenterComponent.');
+		if ($this->strict && !$object instanceof Nette\Application\UI\PresenterComponent) {
+			throw new MemberAccessException('Magic can be used only in descendants of PresenterComponent.');
 		}
 
-		$this->autowirePropertiesLocator = $dic;
-		$cache = new Nette\Caching\Cache($dic->getByType('Nette\Caching\IStorage'), 'Kdyby.Autowired.AutowireProperties');
-		if (($this->autowireProperties = $cache->load($presenterClass = get_class($this))) !== NULL) {
-			foreach ($this->autowireProperties as $propName => $tmp) {
-				unset($this->{$propName});
-			}
+		$cache = new Nette\Caching\Cache($this->container->getByType('Nette\Caching\IStorage'), 'Kdyby.Autowired.AutowireProperties-juzna');
+		$properties = $cache->load($class = get_class($object), function(&$dp) use ($class) {
+			return $this->parseProperties($class, $dp);
+		});
 
-			return;
+		// inject them all
+		foreach ($properties as $property) {
+			$rp = new Property($property['class'], $property['name']);
+			$rp->setAccessible(TRUE);
+			$rp->setValue($object, $this->createInstance($property));
 		}
+	}
 
-		$this->autowireProperties = array();
 
+
+	/**
+	 * Find property definitions for a given class (so that it can be cached)
+	 * @param string $class
+	 * @param array $dp See Cache::save()
+	 * @return array [ { class, name, type, factory, arguments } ]
+	 */
+	private function parseProperties($class, &$dp = array())
+	{
+		$properties = array();
+
+		$rc = new ClassType($class);
 		$ignore = class_parents('Nette\Application\UI\Presenter') + array('ui' => 'Nette\Application\UI\Presenter');
-		foreach ($this->getReflection()->getProperties() as $prop) {
+		foreach ($rc->getProperties() as $prop) {
 			/** @var Property $prop */
 			if (!$this->validateProperty($prop, $ignore)) {
 				continue;
 			}
 
-			$this->resolveProperty($prop);
+			$properties[] = $this->resolveProperty($prop);
 		}
 
+
+		// cache deps
 		$files = array_map(function ($class) {
 			return ClassType::from($class)->getFileName();
-		}, array_diff(array_values(class_parents($presenterClass) + array('me' => $presenterClass)), $ignore));
+		}, array_diff(array_values(class_parents($class) + array('me' => $class)), $ignore));
 
-		$files[] = ClassType::from($this->autowirePropertiesLocator)->getFileName();
+		$files[] = ClassType::from($this->container)->getFileName();
 
-		$cache->save($presenterClass, $this->autowireProperties, array(
-			$cache::FILES => $files,
-		));
+		$dp[Nette\Caching\Cache::FILES] = $files;
+
+
+		return array_filter($properties);
+	}
+
+
+
+	/**
+	 * @param array $property Property definition
+	 * @throws MemberAccessException
+	 * @return mixed
+	 */
+	private function createInstance($property)
+	{
+		if (!empty($property['factory'])) {
+			list ($className, $methodName) = $property['factory'];
+			$factory = callback($this->container->getService($className), $methodName);
+			return $factory->invokeArgs($property['arguments']);
+
+		} else {
+			return $this->container->getByType($property['type']);
+		}
 	}
 
 
@@ -101,7 +145,7 @@ trait AutowireProperties
 				throw new UnexpectedValueException("Annotation @$name on $property should be fixed to lowercase @autowire.");
 			}
 
-			if ($property->isPrivate()) {
+			if ($this->strict && $property->isPrivate()) {
 				throw new MemberAccessException("Autowired properties must be protected or public. Please fix visibility of $property or remove the @autowire annotation.");
 			}
 
@@ -114,28 +158,33 @@ trait AutowireProperties
 
 
 	/**
+	 * Trala lala?? TODO
+	 *
 	 * @param string $type
 	 * @return string|bool
 	 */
 	private function findByTypeForProperty($type)
 	{
-		if (method_exists($this->autowirePropertiesLocator, 'findByType')) {
-			$found = $this->autowirePropertiesLocator->findByType($type);
+		if (method_exists($this->container, 'findByType')) {
+			$found = $this->container->findByType($type);
 
 			return reset($found);
 		}
 
 		$type = ltrim(strtolower($type), '\\');
 
-		return !empty($this->autowirePropertiesLocator->classes[$type])
-			? $this->autowirePropertiesLocator->classes[$type]
+		return !empty($this->container->classes[$type])
+			? $this->container->classes[$type]
 			: FALSE;
 	}
 
 
 
 	/**
+	 * Parse out property info which will be needed for autowiring
+	 *
 	 * @param Property $prop
+	 * @return array|NULL { class, name, type, factory, arguments }
 	 * @throws MissingServiceException
 	 * @throws UnexpectedValueException
 	 */
@@ -143,18 +192,26 @@ trait AutowireProperties
 	{
 		$type = $this->resolveAnnotationClass($prop, $prop->getAnnotation('var'), 'var');
 		$metadata = array(
+			'class' => $prop->declaringClass->name,
+			'name' => $prop->name,
 			'value' => NULL,
 			'type' => $type,
 		);
 
 		if (($args = (array) $prop->getAnnotation('autowire')) && !empty($args['factory'])) {
-			$factoryType = $this->resolveAnnotationClass($prop, $args['factory'], 'autowire');
+			if (strpos($args['factory'], '::') !== FALSE) {
+				list($factoryClass, $factoryMethodName) = explode('::', $args['factory'], 2);
+			} else {
+				$factoryClass = $args['factory'];
+				$factoryMethod = 'create';
+			}
+			$factoryType = $this->resolveAnnotationClass($prop, $factoryClass, 'autowire');
 
 			if (!$this->findByTypeForProperty($factoryType)) {
 				throw new MissingServiceException("Factory of type \"$factoryType\" not found for $prop in annotation @autowire.");
 			}
 
-			$factoryMethod = Method::from($factoryType, 'create');
+			$factoryMethod = Method::from($factoryType, $factoryMethodName);
 			$createsType = $this->resolveAnnotationClass($factoryMethod, $factoryMethod->getAnnotation('return'), 'return');
 			if ($createsType !== $type) {
 				throw new UnexpectedValueException("The property $prop requires $type, but factory of type $factoryType, that creates $createsType was provided.");
@@ -162,15 +219,13 @@ trait AutowireProperties
 
 			unset($args['factory']);
 			$metadata['arguments'] = array_values($args);
-			$metadata['factory'] = $this->findByTypeForProperty($factoryType);
+			$metadata['factory'] = array($this->findByTypeForProperty($factoryType), $factoryMethodName);
 
 		} elseif (!$this->findByTypeForProperty($type)) {
 			throw new MissingServiceException("Service of type \"$type\" not found for $prop in annotation @var.");
 		}
 
-		// unset property to pass control to __set() and __get()
-		unset($this->{$prop->getName()});
-		$this->autowireProperties[$prop->getName()] = $metadata;
+		return $metadata;
 	}
 
 
@@ -194,55 +249,6 @@ trait AutowireProperties
 		}
 
 		return ClassType::from($type)->getName();
-	}
-
-
-
-	/**
-	 * @param string $name
-	 * @param mixed $value
-	 * @throws MemberAccessException
-	 * @return mixed
-	 */
-	public function __set($name, $value)
-	{
-		if (!isset($this->autowireProperties[$name])) {
-			return parent::__set($name, $value);
-
-		} elseif ($this->autowireProperties[$name]['value']) {
-			throw new MemberAccessException("Property \$$name has already been set.");
-
-		} elseif (!$value instanceof $this->autowireProperties[$name]['type']) {
-			throw new MemberAccessException("Property \$$name must be an instance of " . $this->autowireProperties[$name]['type'] . ".");
-		}
-
-		return $this->autowireProperties[$name]['value'] = $value;
-	}
-
-
-
-	/**
-	 * @param $name
-	 * @throws MemberAccessException
-	 * @return mixed
-	 */
-	public function &__get($name)
-	{
-		if (!isset($this->autowireProperties[$name])) {
-			return parent::__get($name);
-		}
-
-		if (empty($this->autowireProperties[$name]['value'])) {
-			if (!empty($this->autowireProperties[$name]['factory'])) {
-				$factory = callback($this->autowirePropertiesLocator->getService($this->autowireProperties[$name]['factory']), 'create');
-				$this->autowireProperties[$name]['value'] = $factory->invokeArgs($this->autowireProperties[$name]['arguments']);
-
-			} else {
-				$this->autowireProperties[$name]['value'] = $this->autowirePropertiesLocator->getByType($this->autowireProperties[$name]['type']);
-			}
-		}
-
-		return $this->autowireProperties[$name]['value'];
 	}
 
 }
