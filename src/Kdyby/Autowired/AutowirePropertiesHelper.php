@@ -60,8 +60,9 @@ class AutowirePropertiesHelper extends Nette\Object
 		}
 
 		$cache = new Nette\Caching\Cache($this->container->getByType('Nette\Caching\IStorage'), 'Kdyby.Autowired.AutowireProperties-juzna');
-		$properties = $cache->load($class = get_class($object), function(&$dp) use ($class) {
-			return $this->parseProperties($class, $dp);
+		$self = $this; // php5.3 hack
+		$properties = $cache->load($class = get_class($object), function(&$dp) use ($class, $self) {
+			return $self->parseProperties($class, $dp);
 		});
 
 		// inject them all
@@ -80,7 +81,7 @@ class AutowirePropertiesHelper extends Nette\Object
 	 * @param array $dp See Cache::save()
 	 * @return array [ { class, name, type, factory, arguments } ]
 	 */
-	private function parseProperties($class, &$dp = array())
+	/*private*/ public function parseProperties($class, &$dp = array())
 	{
 		$properties = array();
 
